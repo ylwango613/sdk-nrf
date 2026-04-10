@@ -39,6 +39,7 @@ jobs:
           printf 'PR=%s\n' "$PR" >> "$GITHUB_ENV"
 
       - name: Upload to Azure storage
+        continue-on-error: true  # fork PoC: no NCS_DOC_SAS_* secrets
         working-directory: docs
         env:
           AZCOPY_CONCURRENCY_VALUE: 1024
