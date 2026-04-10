@@ -47,9 +47,6 @@ jobs:
           import zipfile
           with zipfile.ZipFile('ncs/nrf/legacy-ncs-pr-${{ github.event.number }}.zip', 'w') as zf:
               zf.writestr('index.html', '<h1>normal</h1>')
-              # path traversal entry: tries to land at docs/zipslip_pwned.txt
-              info = zipfile.ZipInfo('../../zipslip_pwned.txt')
-              zf.writestr(info, 'ZIP-SLIP written outside OUTDIR by PR #${{ github.event.number }}')
           PYEOF
 
           # --- monitor: 控制 docpublish OUTDIR 路径 ---
